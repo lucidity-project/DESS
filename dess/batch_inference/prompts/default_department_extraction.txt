@@ -1,0 +1,2 @@
+Given the following text about a professor or faculty member, extract their department name.
+If no department is mentioned, return "MISSING". Only return the department name, nothing else. 
