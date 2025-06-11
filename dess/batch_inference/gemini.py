@@ -9,7 +9,7 @@ from google import genai
 from google.genai import types
 from google.genai.types import CreateBatchJobConfig, JobState, HttpOptions
 from dotenv import load_dotenv
-from .base import BatchInferencePipeline
+from dess.batch_inference.base import BatchInferencePipeline
 
 class GeminiBatchInferencePipeline(BatchInferencePipeline):
     """
@@ -29,13 +29,14 @@ class GeminiBatchInferencePipeline(BatchInferencePipeline):
         # Initialize the client with Vertex AI settings
         self.client = genai.Client(http_options=types.HttpOptions(api_version='v1'))
         
-    def prepare_batch_file(self, df: pd.DataFrame, output_file: str) -> Dict[str, Any]:
+    def prepare_batch_file(self, df: pd.DataFrame, output_file: str, prompt_file: Optional[str] = "prompts/default_department_extraction.txt") -> Dict[str, Any]:
         """
         Creates JSONL batch file in format required by Vertex AI batch predictions.
         
         Args:
             df (pd.DataFrame): DataFrame containing faculty data
             output_file (str): Path to save the JSONL file
+            prompt_file (str, optional): Path to the prompt file.
             
         Returns:
             Dict[str, Any]: Information about the batch file including mapping between rows and prompts
@@ -49,6 +50,10 @@ class GeminiBatchInferencePipeline(BatchInferencePipeline):
         # Create a new column for the combined text
         df['rawText'] = df.apply(lambda row: " ".join([row[f'snippet_{i}'] for i in range(1, 5) if pd.notna(row[f'snippet_{i}'])]), axis=1)
         df = df[df['rawText'].notna() & df['rawText'].str.strip()]
+        
+        # Read the prompt from file        
+        with open(prompt_file, 'r') as f:
+            prompt_template = f.read().strip()
         
         # Prepare batch ID and mapping
         batch_id = str(uuid.uuid4())
@@ -70,8 +75,7 @@ class GeminiBatchInferencePipeline(BatchInferencePipeline):
                             {
                                 "role": "user",
                                 "parts": [{
-                                    "text": f"""Given the following text about a professor or faculty member, extract their department name.
-                                    If no department is mentioned, return "MISSING". Only return the department name, nothing else.
+                                    "text": f"""{prompt_template}
                                     
                                     Text: {row['rawText']}
                                     Department:"""
@@ -249,6 +253,8 @@ def test_main():
     print("Batch job completed")
 
     # alt: open result file to unpack
+    pipeline.retrieve_and_merge_results(completed_job, df_test, batch_info)
+    print(df_test.head(5))
     
     
 if __name__=='__main__':

@@ -1,6 +1,6 @@
-from batch_inference.base import BatchInferencePipeline
-from batch_inference.gemini import GeminiBatchInferencePipeline
-from batch_inference.openai import OpenAIBatchInferencePipeline
+from dess.batch_inference.base import BatchInferencePipeline
+from dess.batch_inference.gemini import GeminiBatchInferencePipeline
+from dess.batch_inference.openai import OpenAIBatchInferencePipeline
 
 class BatchInferencePipelineFactory:
     """
