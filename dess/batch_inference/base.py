@@ -64,6 +64,19 @@ class BatchInferencePipeline(ABC):
         pass
         
     @abstractmethod
+    def wait_for_completion(self, job_reference: Any, poll_interval: int = 30) -> Any:
+        """
+        Waits for batch job to complete.
+        
+        Args:
+            job_reference (Any): Job reference object
+            poll_interval (int): Interval in seconds to poll for job status
+        Returns:
+            Any: Job reference object
+        """
+        pass
+        
+    @abstractmethod
     def retrieve_and_merge_results(self, job_reference: Any, df: pd.DataFrame, mapping: Dict[str, Any]) -> pd.DataFrame:
         """
         Retrieves results and merges back into original dataframe.
