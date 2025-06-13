@@ -9,7 +9,7 @@ from google import genai
 from google.genai import types
 from google.genai.types import CreateBatchJobConfig, JobState, HttpOptions
 from dotenv import load_dotenv
-from dess.batch_inference.base import BatchInferencePipeline
+from base import BatchInferencePipeline
 
 class GeminiBatchInferencePipeline(BatchInferencePipeline):
     """
@@ -225,8 +225,70 @@ class GeminiBatchInferencePipeline(BatchInferencePipeline):
             df.at[idx, 'department_llm'] = result
 
         return df
-        
+
+
+def extract_departments_from_vertex_batch(json_file_path, df=None):
+    """
+    Extract department names from Vertex AI batch output and add as a column to DataFrame.
     
+    Parameters:
+    json_file_path (str): Path to the JSON file containing Vertex AI batch output
+    df (pandas.DataFrame, optional): Existing DataFrame to add departments to. 
+                                   If None, creates a new DataFrame with departments only.
+    
+    Returns:
+    pandas.DataFrame: DataFrame with departments added as a new column
+    """
+    departments = []
+    
+    # Read the JSON file
+    with open(json_file_path, 'r', encoding='utf-8') as file:
+        content = file.read()
+    
+    # Split by lines since each JSON object is on a separate line
+    lines = content.strip().split('\n')
+    
+    for line in lines:
+        if line.strip():  # Skip empty lines
+            try:
+                # Parse each JSON object
+                json_obj = json.loads(line)
+                
+                # Navigate to the department text in the response
+                response = json_obj.get('response', {})
+                candidates = response.get('candidates', [])
+                
+                if candidates:
+                    content_obj = candidates[0].get('content', {})
+                    parts = content_obj.get('parts', [])
+                    
+                    if parts:
+                        # Extract the text which contains the department name
+                        department_text = parts[0].get('text', '').strip()
+                        # Remove any trailing newlines
+                        department_text = department_text.rstrip('\n')
+                        departments.append(department_text)
+                    else:
+                        departments.append('MISSING')
+                else:
+                    departments.append('MISSING')
+                    
+            except json.JSONDecodeError as e:
+                print(f"Error parsing JSON line: {e}")
+                departments.append('MISSING')
+            except Exception as e:
+                print(f"Error processing line: {e}")
+                departments.append('MISSING')
+    
+    # If no DataFrame provided, create a new one
+    if df is None:
+        df = pd.DataFrame()
+    
+    # Add departments as a new column
+    df['department_llm'] = departments
+    
+    return df       
+ 
 def test_main():
     pipeline = GeminiBatchInferencePipeline(model_name="gemini-2.0-flash-001")
     df_test  = pd.read_parquet('/Users/akhil/Desktop/RA-Scraping/DESS/storage/dataset/test_llm.parquet')
@@ -258,4 +320,7 @@ def test_main():
     
     
 if __name__=='__main__':
-    test_main()
+    df_test  = pd.read_parquet('/Users/akhil/Desktop/RA-Scraping/DESS/storage/dataset/test_llm.parquet')
+    json_path = '/Users/akhil/Desktop/RA-Scraping/DESS/dess/output_prediction-model-2025-05-19T02_41_34.174235Z_predictions.jsonl'
+    #test_main()
+    print(get_departments_list(json_path))
