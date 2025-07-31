@@ -1,0 +1,23 @@
+[package]
+name = "rmp-experiment"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mvp"
+path = "mvp.rs"
+
+[[bin]]
+name = "efficient"
+path = "efficient_mvp.rs"
+
+[[bin]]
+name = "batch"
+path = "batch_mvp.rs"
+
+[dependencies]
+rate_my_professor_api_rs = "0.1.5"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+arrow = "53"
+parquet = "53"
