@@ -54,25 +54,20 @@ def end_to_end_workflow():
     df_non_errors = df.dropna(subset=['rawText']).copy().reset_index(drop=True) # Create a copy with reset index to avoid index mismatch issues
     nlp.extract_department_information(df_non_errors)
 
-        logging.info("[COMPLETE] Phase 2: Populate Department Variables")
+    logging.info("[COMPLETE] Phase 2: Populate Department Variables")
 
     # 4. Update out files
     dpm.update_parquet_file(df_non_errors, FILE_PATH, processed_ids)
 
-        # 5. Cloud Sync and local cleanup
-        logging.info("Starting Phase 3: Uploading to dropbox...")
-        dbx = dpm.dropbox_oauth()
-        dpm.push_new_dataset_files_to_dropbox(dbx)
-        logging.info("[COMPLETE] Phase 3: Dropbox sync")
+    # 5. Cloud Sync and local cleanup
+    logging.info("Starting Phase 3: Uploading to dropbox...")
+    dbx = dpm.dropbox_oauth()
+    dpm.push_new_dataset_files_to_dropbox(dbx)
+    logging.info("[COMPLETE] Phase 3: Dropbox sync")
         
-        # 6. Logging & Metrics
-        processed_count = len(df_non_errors)
-        logging.info(f"Processed {processed_count} rows. Error {len(df) - processed_count} rows.")
-    except:
-        folder = f'{STORAGE_DIR}/dataset'
-        for file in os.listdir(folder):
-            if file.endswith('.csv'):
-                os.remove(os.path.join(folder, file))
+    # 6. Logging & Metrics
+    processed_count = len(df_non_errors)
+    logging.info(f"Processed {processed_count} rows. Error {len(df) - processed_count} rows.")
     
 if __name__== "__main__":
     end_to_end_workflow()

@@ -1,6 +1,8 @@
 internalUpdates.md
 storage/
-.*env/
+.*/
 .env
 __pycache__/
 .DS_Store
+temp_files/
+rmp-experiment/target/

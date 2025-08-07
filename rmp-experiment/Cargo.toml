@@ -1,0 +1,29 @@
+[package]
+name = "rmp-experiment"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "mvp"
+path = "mvp.rs"
+
+[[bin]]
+name = "efficient"
+path = "efficient_mvp.rs"
+
+[[bin]]
+name = "batch"
+path = "batch_mvp.rs"
+
+[dependencies]
+rate_my_professor_api_rs = "0.1.5"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+arrow = "53"
+parquet = "53"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+env_logger = "0.9"
+sanitize-filename = "0.5.0"
+reqwest = { version = "0.12", features = ["json"] }
