@@ -1,15 +1,110 @@
-use rateMyProfessorApi_rs::methods::RateMyProfessor;
 use anyhow::Result;
-use std::env;
-use std::collections::HashMap;
-use std::fs::File;
-use std::time::{Duration, Instant};
-use arrow::array::{Array, StringArray, ArrayRef};
-use arrow::record_batch::RecordBatch;
-use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
+use arrow::array::{Array, ArrayRef, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use log::{info, warn};
+use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
 use parquet::file::properties::WriterProperties;
+use rateMyProfessorApi_rs::methods::RateMyProfessor;
+use sanitize_filename::sanitize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::fs::File;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const CACHE_DIR: &str = "storage/rmp-cache";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfessorList {
+    /// Unique ID associated with a particular professor.
+    pub id: Option<String>,
+    /// Old unique ID that was used to identify a particular professor.
+    pub legacy_id: Option<String>,
+    /// First name of the Professor.
+    pub first_name: Option<String>,
+    /// Last name of the Professor.
+    pub last_name: Option<String>,
+    /// Department which the professor is affiliated with.
+    pub department: Option<String>,
+    /// Floating point value ranging from `1.0-5.0` on a scale of satisfaction.
+    pub avg_rating: Option<f64>,
+    /// Number of students that have provided feedback on this professor.
+    pub num_rating: Option<i32>,
+    /// Floating point value between `1.0-5.0` representing the difficulty level o
+    pub avg_difficulty: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProfessorNode {
+    node: ProfessorList,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProfessorEdges {
+    edges: Vec<ProfessorNode>,
+    #[serde(rename = "pageInfo")]
+    page_info: PageInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TeacherSearch {
+    teachers: ProfessorEdges,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NewSearch {
+    search: TeacherSearch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResponseData {
+    data: NewSearch,
+}
+
+pub const TEACHER_LIST_QUERY: &str = r#"query TeacherSearchResultsPageQuery(
+        $query: TeacherSearchQuery!
+        $count: Int!
+        $cursor: String
+    ) {
+        newSearch {
+            teachers(query: $query, first: $count, after: $cursor) {
+                edges {
+                    node {
+                        id
+                        legacyId
+                        firstName
+                        lastName
+                        department
+                        avgRating
+                        numRatings
+                        wouldTakeAgainPercent
+                        avgDifficulty
+                        school {
+                            name
+                            id
+                        }
+                    }
+                }
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
+                resultCount
+            }
+        }
+    }"#;
 
 #[derive(Debug, Clone)]
 struct ProfessorQuery {
@@ -173,67 +268,183 @@ fn group_queries_by_university(queries: Vec<ProfessorQuery>) -> HashMap<String, 
 
 
 
+use reqwest::header::{HeaderMap, HeaderValue};
+
+pub const API_LINK: &str = "https://www.ratemyprofessors.com/graphql"; // base URL
+
+pub fn get_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "User-Agent",
+        HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:129.0) Gecko/20100101 Firefox/129.0",
+        ),
+    );
+    headers.insert("Accept", HeaderValue::from_static("*/*"));
+    headers.insert("Accept-Language", HeaderValue::from_static("en-US,en;q=0.5"));
+    headers.insert(
+        "Content-Type",
+        HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        "Authorization",
+        HeaderValue::from_static("Basic dGVzdDp0ZXN0"),
+    );
+    headers.insert("Sec-GPC", HeaderValue::from_static("1"));
+    headers.insert("Sec-Fetch-Dest", HeaderValue::from_static("empty"));
+    headers.insert("Sec-Fetch-Mode", HeaderValue::from_static("cors"));
+    headers.insert("Sec-Fetch-Site", HeaderValue::from_static("same-origin"));
+    headers.insert("Priority", HeaderValue::from_static("u=4"));
+    headers
+}
+
+async fn get_professor_list_by_school_paginated(college_id: &str) -> Result<Vec<ProfessorList>> {
+    let mut all_professors: Vec<ProfessorList> = Vec::new();
+    let mut has_next_page = true;
+    let mut cursor: Option<String> = None;
+    let client = reqwest::Client::new();
+
+    while has_next_page {
+        let variables = serde_json::json!({
+            "query": {
+                "text": "",
+                "schoolID": college_id,
+                "fallback": true,
+                "departmentID": null,
+            },
+            "count": 1000,
+            "cursor": cursor,
+        });
+
+        let payload = serde_json::json!({
+            "query": TEACHER_LIST_QUERY,
+            "variables": variables,
+        });
+
+        let response = client
+            .post(API_LINK)
+            .headers(get_headers())
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Network response from RMP not OK"));
+        }
+
+        let response_data: ResponseData = response.json().await?;
+        let search_results = response_data.data.search;
+        let page_info = search_results.teachers.page_info;
+
+        for edge in search_results.teachers.edges {
+            all_professors.push(edge.node);
+        }
+
+        has_next_page = page_info.has_next_page;
+        cursor = page_info.end_cursor;
+    }
+
+    Ok(all_professors)
+}
+
+async fn get_or_cache_professor_list(
+    university: &str,
+    stats: &mut ProcessingStats,
+) -> Result<Vec<ProfessorList>> {
+    let file_name = sanitize(university);
+    let cache_path = Path::new(CACHE_DIR).join(format!("{}.json", file_name));
+
+    if let Ok(file_content) = fs::read_to_string(&cache_path) {
+        if let Ok(professor_list) = serde_json::from_str(&file_content) {
+            info!("   CACHE HIT for {}", university);
+            return Ok(professor_list);
+        }
+    }
+
+    info!("   CACHE MISS for {}", university);
+    let api_start = Instant::now();
+    stats.api_calls_made += 1;
+
+    let mut rmp = RateMyProfessor::construct_college(university);
+    let schools = rmp.get_college_info().await?;
+    let school = schools
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No school found with name {}", university))?;
+    let school_id = &school.node.id;
+
+    let professor_list = get_professor_list_by_school_paginated(school_id).await?;
+
+    let api_duration = api_start.elapsed();
+    info!(
+        "   ✅ Found {} professors in {:?}",
+        professor_list.len(),
+        api_duration
+    );
+
+    let file_content = serde_json::to_string_pretty(&professor_list)?;
+    fs::write(&cache_path, file_content)?;
+    info!("   CACHED to {:?}", cache_path);
+
+    Ok(professor_list)
+}
+
 /// Process universities with actual API calls
 async fn process_universities(
-    queries_by_university: HashMap<String, Vec<ProfessorQuery>>
+    queries_by_university: HashMap<String, Vec<ProfessorQuery>>,
 ) -> Result<Vec<ProfessorResult>> {
     let mut stats = ProcessingStats::new();
     stats.total_rows = queries_by_university.values().map(|v| v.len()).sum();
     stats.unique_universities = queries_by_university.len();
-    
-    println!("\n🚀 Starting API processing...");
-    println!("📊 Total rows: {}", stats.total_rows);
-    println!("🏫 Unique universities: {}", stats.unique_universities);
-    println!("⏱️  Starting at: {:?}", stats.start_time);
-    
+
+    info!("🚀 Starting API processing...");
+    info!("📊 Total rows: {}", stats.total_rows);
+    info!("🏫 Unique universities: {}", stats.unique_universities);
+    info!("⏱️  Starting at: {:?}", stats.start_time);
+
     let mut all_results: Vec<ProfessorResult> = Vec::new();
     let mut processed_count = 0;
-    
+
     // Process each university once
     for (university, university_queries) in queries_by_university {
         stats.print_progress(processed_count, &university);
-        
-        let api_start = Instant::now();
-        
-        // Single API call per university
-        let mut rate_my_professor_instance = RateMyProfessor::construct_college(&university);
-        stats.api_calls_made += 1;
-        
-        match rate_my_professor_instance.get_professor_list().await {
+
+        match get_or_cache_professor_list(&university, &mut stats).await {
             Ok(professor_list) => {
-                let api_duration = api_start.elapsed();
-                println!("   ✅ Found {} professors in {:?}", professor_list.len(), api_duration);
-                
                 // Build lookup map for this university
                 let mut name_to_department: HashMap<String, String> = HashMap::new();
                 for prof in &professor_list {
-                    if let (Some(first), Some(last), Some(dept)) = (&prof.first_name, &prof.last_name, &prof.department) {
+                    if let (Some(first), Some(last), Some(dept)) =
+                        (&prof.first_name, &prof.last_name, &prof.department)
+                    {
                         let full_name = format!("{} {}", first, last).to_lowercase();
                         name_to_department.insert(full_name, dept.clone());
                     }
                 }
-                
+
                 // Process all queries for this university
                 let mut local_matches = 0;
                 let total_queries_for_university = university_queries.len();
                 for query in university_queries {
                     let search_name = query.professor_name.to_lowercase();
-                    let department_rmp = name_to_department.get(&search_name).cloned()
-                        .or_else(|| {
+                    let department_rmp = name_to_department.get(&search_name).cloned().or_else(
+                        || {
                             // Try partial matching
                             for (stored_name, dept) in &name_to_department {
-                                if stored_name.contains(&search_name) || search_name.contains(stored_name) {
+                                if stored_name.contains(&search_name)
+                                    || search_name.contains(stored_name)
+                                {
                                     return Some(dept.clone());
                                 }
                             }
                             None
-                        });
-                    
+                        },
+                    );
+
                     if department_rmp.is_some() {
                         local_matches += 1;
                         stats.successful_matches += 1;
                     }
-                    
+
                     all_results.push(ProfessorResult {
                         university: query.university,
                         firstname: query.firstname,
@@ -242,13 +453,15 @@ async fn process_universities(
                         row_index: query.row_index,
                     });
                 }
-                
-                println!("   📊 Matched {}/{} professors from this university", 
-                         local_matches, total_queries_for_university);
+
+                info!(
+                    "   📊 Matched {}/{} professors from this university",
+                    local_matches, total_queries_for_university
+                );
             }
             Err(e) => {
-                println!("   ❌ Error fetching professors: {}", e);
-                
+                warn!("   ❌ Error fetching professors: {}", e);
+
                 // Add error results for all queries from this university
                 for query in university_queries {
                     all_results.push(ProfessorResult {
@@ -261,21 +474,24 @@ async fn process_universities(
                 }
             }
         }
-        
+
         processed_count += 1;
-        
+
         // Add a small delay to be respectful to the API
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
-    
+
     // Final statistics
-    println!("\n📈 Processing Complete!");
-    println!("⏱️  Total time: {:?}", stats.elapsed());
-    println!("🎯 Success rate: {}/{} ({:.1}%)", 
-             stats.successful_matches, stats.total_rows,
-             (stats.successful_matches as f64 / stats.total_rows as f64) * 100.0);
-    println!("🌐 API calls made: {}", stats.api_calls_made);
-    
+    info!("\n📈 Processing Complete!");
+    info!("⏱️  Total time: {:?}", stats.elapsed());
+    info!(
+        "🎯 Success rate: {}/{} ({:.1}%)",
+        stats.successful_matches,
+        stats.total_rows,
+        (stats.successful_matches as f64 / stats.total_rows as f64) * 100.0
+    );
+    info!("🌐 API calls made: {}", stats.api_calls_made);
+
     Ok(all_results)
 }
 
@@ -329,9 +545,13 @@ fn write_results_to_file(file_path: &str, results: Vec<ProfessorResult>) -> Resu
 #[tokio::main]
 async fn main() -> Result<()> {
     let total_start = Instant::now();
-    
+    env_logger::init();
+
+    // Create cache directory if it doesn't exist
+    fs::create_dir_all(CACHE_DIR)?;
+
     let args: Vec<String> = env::args().collect();
-    
+
     if args.len() < 2 || args.len() > 3 {
         eprintln!("Usage: {} <parquet_file> [max_rows]", args[0]);
         eprintln!("");
@@ -347,48 +567,61 @@ async fn main() -> Result<()> {
         eprintln!("  {} faculty.parquet 100       # Process first 100 rows only", args[0]);
         std::process::exit(1);
     }
-    
+
     let file_path = &args[1];
     let max_rows = args.get(2).and_then(|s| s.parse::<usize>().ok());
-    
-    println!("🚀 Starting processing...");
+
+    info!("🚀 Starting processing...");
     if let Some(limit) = max_rows {
-        println!("   Limiting to {} rows for testing", limit);
+        info!("   Limiting to {} rows for testing", limit);
     }
-    
+
     // Step 1: Read parquet file
     let queries = read_parquet_file(file_path, max_rows)?;
-    
+
     if queries.is_empty() {
-        println!("❌ No valid queries found in file");
+        warn!("❌ No valid queries found in file");
         return Ok(());
     }
-    
+
     // Step 2: Group by university
     let queries_by_university = group_queries_by_university(queries);
-    
-    let total_rows = queries_by_university.values().map(|v| v.len()).sum::<usize>();
-    println!("\n📋 Ready to process {} rows across {} universities", total_rows, queries_by_university.len());
-    
+
+    let total_rows = queries_by_university
+        .values()
+        .map(|v| v.len())
+        .sum::<usize>();
+    info!(
+        "\n📋 Ready to process {} rows across {} universities",
+        total_rows,
+        queries_by_university.len()
+    );
+
     // Show top 3 universities by professor count
     let mut sorted_unis: Vec<_> = queries_by_university.iter().collect();
     sorted_unis.sort_by_key(|(_, profs)| std::cmp::Reverse(profs.len()));
     for (university, profs) in sorted_unis.iter().take(3) {
-        println!("   {} → {} professors", university, profs.len());
+        info!("   {} → {} professors", university, profs.len());
     }
     if queries_by_university.len() > 3 {
-        println!("   ... and {} more universities", queries_by_university.len() - 3);
+        info!(
+            "   ... and {} more universities",
+            queries_by_university.len() - 3
+        );
     }
-    
+
     // Step 3: Process with API calls
     let results = process_universities(queries_by_university).await?;
-    
+
     // Step 4: Write back to file
     write_results_to_file(file_path, results)?;
-    
-    println!("\n🎉 Complete! File {} has been updated with department_rmp column.", file_path);
-    
-    println!("⏱️  Total processing time: {:?}", total_start.elapsed());
-    
+
+    info!(
+        "\n🎉 Complete! File {} has been updated with department_rmp column.",
+        file_path
+    );
+
+    info!("⏱️  Total processing time: {:?}", total_start.elapsed());
+
     Ok(())
 } 
